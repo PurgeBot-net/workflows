@@ -1,0 +1,123 @@
+name: Auto Label PR
+
+on:
+  workflow_call:
+
+jobs:
+  auto-label:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Auto-label PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+
+            const pr = context.payload.pull_request;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const prNumber = pr.number;
+            const body = pr.body || '';
+
+            const LABEL_DEFS = {
+              'needs:bump_common':    { color: 'd93f0b', description: 'PR references common repo changes' },
+              'needs:bump_database':  { color: 'd93f0b', description: 'PR references database repo changes' },
+              'needs:bump_locale':    { color: 'd93f0b', description: 'PR references locale repo changes' },
+              'needs:gomod_comment':  { color: 'b60205', description: 'go.mod has uncommented local replace directives' },
+              'type:bug':             { color: 'd73a4a', description: 'Bug fix' },
+              'type:feature':         { color: '0e8a16', description: 'New feature' },
+              'type:improvement':     { color: '1d76db', description: 'Improvement or refactor' },
+              'type:breaking':        { color: '6f42c1', description: 'Breaking change' },
+              'type:deps':            { color: 'e4e669', description: 'Dependency update' },
+              'type:documentation':   { color: '0075ca', description: 'Documentation' },
+            };
+
+            async function ensureLabelExists(labelName) {
+              try {
+                await github.rest.issues.getLabel({ owner, repo, name: labelName });
+              } catch (e) {
+                if (e.status === 404) {
+                  const def = LABEL_DEFS[labelName];
+                  await github.rest.issues.createLabel({ owner, repo, name: labelName, color: def.color, description: def.description });
+                } else {
+                  throw e;
+                }
+              }
+            }
+
+            async function addLabel(labelName) {
+              await ensureLabelExists(labelName);
+              await github.rest.issues.addLabels({ owner, repo, issue_number: prNumber, labels: [labelName] });
+            }
+
+            async function removeLabel(labelName) {
+              try {
+                await github.rest.issues.removeLabel({ owner, repo, issue_number: prNumber, name: labelName });
+              } catch (e) {
+                if (e.status !== 404) throw e;
+              }
+            }
+
+            const currentLabelsResp = await github.rest.issues.listLabelsOnIssue({ owner, repo, issue_number: prNumber });
+            const currentLabels = new Set(currentLabelsResp.data.map(l => l.name));
+
+            const labelsToAdd = new Set();
+            const labelsToRemove = new Set();
+
+            // needs:bump_* — add when PR body references the repo, remove when it no longer does
+            const bumpChecks = [
+              { repo: 'common',   label: 'needs:bump_common' },
+              { repo: 'database', label: 'needs:bump_database' },
+              { repo: 'locale',   label: 'needs:bump_locale' },
+            ];
+            for (const { repo: r, label } of bumpChecks) {
+              const pattern = new RegExp(`(?:https?://github\\.com/PurgeBot-net/${r}/pull/\\d+|PurgeBot-net/${r}#\\d+)`, 'i');
+              if (pattern.test(body)) {
+                labelsToAdd.add(label);
+              } else if (currentLabels.has(label)) {
+                labelsToRemove.add(label);
+              }
+            }
+
+            // needs:gomod_comment — uncommented local replace directives
+            try {
+              const gomod = fs.readFileSync('go.mod', 'utf8');
+              if (/^replace\s+\S+\s+=>\s+\.\./m.test(gomod)) {
+                labelsToAdd.add('needs:gomod_comment');
+              } else if (currentLabels.has('needs:gomod_comment')) {
+                labelsToRemove.add('needs:gomod_comment');
+              }
+            } catch {
+              core.info('No go.mod found, skipping replace directive check');
+            }
+
+            // type:* labels from PR body checkboxes
+            const typeChecks = [
+              { checkbox: 'Bug fix',                 label: 'type:bug' },
+              { checkbox: 'New feature',             label: 'type:feature' },
+              { checkbox: 'Improvement / refactor',  label: 'type:improvement' },
+              { checkbox: 'Breaking change',         label: 'type:breaking' },
+              { checkbox: 'Dependency update',       label: 'type:deps' },
+              { checkbox: 'Documentation',           label: 'type:documentation' },
+            ];
+            for (const { checkbox, label } of typeChecks) {
+              const escaped = checkbox.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              if (new RegExp(`- \\[x\\] ${escaped}`, 'i').test(body)) {
+                labelsToAdd.add(label);
+              } else if (currentLabels.has(label)) {
+                labelsToRemove.add(label);
+              }
+            }
+
+            for (const label of labelsToAdd) {
+              if (!currentLabels.has(label)) await addLabel(label);
+            }
+            for (const label of labelsToRemove) {
+              await removeLabel(label);
+            }

@@ -1,0 +1,29 @@
+name: Validate Docker
+
+on:
+  workflow_call:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate docker-compose.yml
+        run: |
+          touch .env
+          docker compose -f docker-compose.yml config > /dev/null
+
+      - name: Check all compose variables are documented in .env.example
+        run: |
+          refs=$(grep -oE '\$\{[A-Z_0-9]+\}' docker-compose.yml | sed 's/[${}]//g' | sort -u)
+          keys=$(grep -E '^[A-Z_0-9]+=' .env.example | cut -d= -f1 | sort -u)
+
+          missing=$(comm -23 <(echo "$refs") <(echo "$keys"))
+          if [ -n "$missing" ]; then
+            echo "Variables referenced in docker-compose.yml but missing from .env.example:"
+            echo "$missing"
+            exit 1
+          fi
+          echo "All compose variables are documented in .env.example."
